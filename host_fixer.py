@@ -118,8 +118,6 @@ if __name__ == '__main__':
         if os.geteuid() != 0:
             sys.exit("You need to have root privileges to run this script")
 
-        file_list = ['/etc/hosts',
-                     '/usr/discreet/backburner/Network/backburner.xml']
         main()
 
 
