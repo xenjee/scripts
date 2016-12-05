@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 from __future__ import print_function
 from contextlib import contextmanager
+from xml.etree import ElementTree as et
 import os
 import sys
 import re
 import fileinput
-import subprocess as sb 
+import subprocess as sb
 
-__version__ = '0.1 - Beta testing'
+__version__ = '0.2 - Beta'
 __author__ = 'Michael Taylor - mike.taylor@autodesk.com'
 
 
@@ -19,8 +20,7 @@ def ignored(*exceptions):
         pass
 
 
-file_list = ['/etc/hosts',
-             '/usr/discreet/backburner/Network/backburner.xml']
+file_list = ['/etc/hosts', '/usr/discreet/backburner/Network/backburner.xml']
 
 
 def parser():
@@ -28,7 +28,7 @@ def parser():
         with open(file_list[0], 'r') as f:
             hostfile = f.readlines()
         with open(file_list[1], 'r') as f:
-            bb_xml = f.readlines()
+            bb_xml = f.read()
             return hostfile, bb_xml
 
 
@@ -42,17 +42,18 @@ def primary_int():
     if kernel == 'linux':
         with open('/proc/net/route', 'r') as f:
             route_table = f.readlines()
-        route_table = [lines.split() for lines in route_table]
-        gw_int = [lines[0] for lines in route_table[1:]
-                  if lines[1] == '00000000' and lines[7] == '00000000']
+        route_tb = [lines.split() for lines in route_table]
+        zero = '00000000'
+        gw_int = []
+        for line in route_tb:
+            if line[1] == zero and line[7] == zero:
+                gw_int.append(line[0])
 
     if kernel == 'darwin':
         cmd = ['route', 'get', '224.0.0.1']
         ip_match = re.compile('(?<=interface:\s)\w+.*?')
         ip_from_gw_int, err = sb.Popen(cmd, stdout=sb.PIPE).communicate()
-
         gw_int = re.findall(ip_match, ip_from_gw_int)
-
     return gw_int
 
 
@@ -75,25 +76,65 @@ def correct_hostfile(primary_ip):
             host_add.write('%s' % item)
 
 
-def main():
-    """ This function does (3) operations:
-         1. Setup the /etc/hosts file to be hashed 
-            into a dictionary for corrections.
-         2. Stores backburner.xml data into memory
-         3. Locates primary interface & ip address
+def backburner_fix(xml, ipaddr):
+    """This function does (4) operations:
+       (1) Stops backburner services
+       (2) Checks whether the backburner manager is remote or local.
+       (3) Then corrects the xml file if needed.
+       (4) Starts backburner services
     """
-    hostfile, bb_xml = parser()
+    host = os.uname()[1]
 
-    ips_match = re.compile('^\d+\.\d+\.\d+\.\d+')
-    host_match = re.compile('^\s*\d+\.\d+\.\d+\.\d+')
+    #Stopping backburner
+    print('Performing backburner.xml checks...')
+    print('Stopping backburner services')
+    cmd = '/etc/init.d/backburner'
+    pid = sb.Popen([cmd, 'stop'])
+    pid.wait()
 
-    ips = [ln.split()[0] for ln in hostfile if re.findall(ips_match, ln)]
-    names = [ln.split()[1:] for ln in hostfile if re.findall(host_match, ln)]
+    tree = et.fromstring(xml)
+    m_name = tree.getiterator('ManagerName')[0]
+    s_name = tree.getiterator('ServerName')[0]
 
-    host_table = dict(zip(ips, names))
+    #Manager correction
+    if m_name.text != host and \
+       m_name.text != ipaddr and \
+       m_name.text != 'localhost':
+        print('Manager %s does not match hostname!' % (m_name.text))
+    while True:
+        try:
+            ans = raw_input('Are you using a remote manager? (y/n) ')
 
-    gw_int = primary_int()
+            if ans == 'y' or ans == 'yes':
+                print('Skipping manager name correction')
+            elif ans == 'n' or ans == 'no':
+                print('Correcting the manager name to the local workstation IP')
+                m_name.text = ipaddr
+            else:
+                raise ValueError
+                continue
+        except ValueError:
+            print("Sorry, I didn't understand the input")
+        else:
+            break
+    #Server correction
+    if s_name.text != os.uname()[1] or s_name.text != ipaddr:
+        print('Server name mismatch in backburner.xml..')
+        s_name.text = ipaddr
+        print('Corrected!')
 
+    data = et.ElementTree(tree)
+    data.write(file_list[1])
+
+    #Starting Backburner
+    start_pid = sb.Popen([cmd, 'start'])
+    start_pid.wait()
+
+
+
+
+def get_ipaddr(gw_int):
+    """Returns the primary IP address"""
     if kernel == 'linux':
         cmd = ['ip', 'addr', 'show', gw_int[0]]
         ip_from_gw_int, err = sb.Popen(cmd, stdout=sb.PIPE).communicate()
@@ -105,8 +146,28 @@ def main():
         ip_data, err = sb.Popen(cmd_ifcfg, stdout=sb.PIPE).communicate()
         primary_ip = re.findall(ip_search, ip_data)[0]
 
-    correct_hostfile(primary_ip)
-    return
+    return primary_ip
+
+
+def main():
+    """ The main function does (3) operations:
+         1. Setup the /etc/hosts file to be hashed
+            into a dictionary for corrections.
+         2. Stores backburner.xml data into bb_xml
+         3. Locates primary interface & ip address
+    """
+    hostfile, bb_xml = parser()
+
+    ips_match = re.compile('^\d+\.\d+\.\d+\.\d+')
+    host_match = re.compile('^\s*\d+\.\d+\.\d+\.\d+')
+
+    ips = [ln.split()[0] for ln in hostfile if re.findall(ips_match, ln)]
+    names = [ln.split()[1:] for ln in hostfile if re.findall(host_match, ln)]
+    host_table = dict(zip(ips, names))
+    ipaddr = get_ipaddr(primary_int())
+
+    correct_hostfile(ipaddr)
+    backburner_fix(bb_xml, ipaddr)
 
 
 if __name__ == '__main__':
@@ -117,7 +178,4 @@ if __name__ == '__main__':
     else:
         if os.geteuid() != 0:
             sys.exit("You need to have root privileges to run this script")
-
         main()
-
-
