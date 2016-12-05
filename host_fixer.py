@@ -118,7 +118,9 @@ def backburner_fix(xml, ipaddr):
         else:
             break
     #Server correction
-    if s_name.text != os.uname()[1] or s_name.text != ipaddr:
+    if s_name.text != os.uname()[1] and \
+       s_name.text != ipaddr and \
+       s_name.text != 'localhost':
         print('Server name mismatch in backburner.xml..')
         s_name.text = ipaddr
         print('Corrected!')
